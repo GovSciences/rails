@@ -64,6 +64,7 @@ module ActiveSupport
   #   saved
   module Callbacks
     extend Concern
+    require 'callback_debugger.rb'
 
     included do
       extend ActiveSupport::DescendantsTracker
@@ -95,48 +96,62 @@ module ActiveSupport
     # smoothly through and into the supplied block, we want as little evidence
     # as possible that we were here.
     def run_callbacks(kind)
-      callbacks = __callbacks[kind.to_sym]
 
-      if callbacks.empty?
-        yield if block_given?
-      else
-        env = Filters::Environment.new(self, false, nil)
-        next_sequence = callbacks.compile
+      ::CallbackDebugger.log_block("#{self.class.name} - run_callbacks: #{kind}") do
+        callbacks = __callbacks[kind.to_sym]
 
-        invoke_sequence = Proc.new do
-          skipped = nil
-          while true
-            current = next_sequence
-            current.invoke_before(env)
-            if current.final?
-              env.value = !env.halted && (!block_given? || yield)
-            elsif current.skip?(env)
-              (skipped ||= []) << current
-              next_sequence = next_sequence.nested
-              next
-            else
-              next_sequence = next_sequence.nested
-              begin
-                target, block, method, *arguments = current.expand_call_template(env, invoke_sequence)
-                target.send(method, *arguments, &block)
-              ensure
-                next_sequence = current
-              end
-            end
-            current.invoke_after(env)
-            skipped.pop.invoke_after(env) while skipped && skipped.first
-            break env.value
-          end
-        end
-
-        # Common case: no 'around' callbacks defined
-        if next_sequence.final?
-          next_sequence.invoke_before(env)
-          env.value = !env.halted && (!block_given? || yield)
-          next_sequence.invoke_after(env)
-          env.value
+        if callbacks.empty?
+          yield if block_given?
         else
-          invoke_sequence.call
+          env = Filters::Environment.new(self, false, nil)
+          next_sequence = callbacks.compile
+
+          invoke_sequence = Proc.new do
+            skipped = nil
+            while true
+              current = next_sequence
+              ::CallbackDebugger.log_block "#{self.class.name} - before_#{kind}" do
+                current.invoke_before(env)
+              end
+              if current.final?
+                env.value = !env.halted && (!block_given? || yield)
+              elsif current.skip?(env)
+                (skipped ||= []) << current
+                next_sequence = next_sequence.nested
+                next
+              else
+                next_sequence = next_sequence.nested
+                begin
+                  target, block, method, *arguments = current.expand_call_template(env, invoke_sequence)
+                  ::CallbackDebugger.log_block "#{target.class.name} - #{method}" do
+                    target.send(method, *arguments, &block)
+                  end
+                ensure
+                  next_sequence = current
+                end
+              end
+              ::CallbackDebugger.log_block "#{self.class.name} - after_#{kind}" do
+                current.invoke_after(env)
+              end
+              skipped.pop.invoke_after(env) while skipped && skipped.first
+              break env.value
+            end
+          end
+
+          # Common case: no 'around' callbacks defined
+          if next_sequence.final?
+            ::CallbackDebugger.log_block "#{self.class.name} - before_#{kind}" do
+              next_sequence.invoke_before(env)
+            end
+            env.value = !env.halted && (!block_given? || yield)
+            ::CallbackDebugger.log_block "#{self.class.name} - after_#{kind}" do
+              next_sequence.invoke_after(env)
+            end
+            env.value
+          else
+            ::CallbackDebugger.log "#{self.class.name} - invoke_sequence.call"
+            invoke_sequence.call
+          end
         end
       end
     end
@@ -181,7 +196,9 @@ module ActiveSupport
                 result_lambda = -> { user_callback.call target, value }
                 env.halted = halted_lambda.call(target, result_lambda)
                 if env.halted
-                  target.send :halted_callback_hook, filter
+                  ::CallbackDebugger.log_block "#{target.class.name} - :halted_callback_hook" do
+                    target.send :halted_callback_hook, filter
+                  end
                 end
               end
 
@@ -201,7 +218,9 @@ module ActiveSupport
                 env.halted = halted_lambda.call(target, result_lambda)
 
                 if env.halted
-                  target.send :halted_callback_hook, filter
+                  ::CallbackDebugger.log_block "#{target.class.name} - :halted_callback_hook" do
+                    target.send :halted_callback_hook, filter
+                  end
                 end
               end
 
@@ -425,7 +444,9 @@ module ActiveSupport
         def make_lambda
           lambda do |target, value, &block|
             target, block, method, *arguments = expand(target, value, block)
-            target.send(method, *arguments, &block)
+            ::CallbackDebugger.log_block "#{method}" do
+              target.send(method, *arguments, &block)
+            end
           end
         end
 
@@ -434,7 +455,9 @@ module ActiveSupport
         def inverted_lambda
           lambda do |target, value, &block|
             target, block, method, *arguments = expand(target, value, block)
-            ! target.send(method, *arguments, &block)
+            ::CallbackDebugger.log_block "#{method}" do
+              ! target.send(method, *arguments, &block)
+            end
           end
         end
 
